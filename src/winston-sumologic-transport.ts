@@ -1,7 +1,5 @@
-import * as winston from 'winston';
-import * as request from 'request';
-
-import { TransportInstance } from 'winston';
+import request from 'request';
+import TransportStream from 'winston-transport';
 
 export interface SumoLogicTransportOptions {
   url?: string;
@@ -10,10 +8,7 @@ export interface SumoLogicTransportOptions {
   interval?: number;
   label?: string;
   meta?: any;
-}
-
-export interface SumoLogicTransportInstance extends TransportInstance {
-  new (options?: SumoLogicTransportOptions): SumoLogicTransportInstance;
+  onError?: (error: Error) => Promise<void>;
 }
 
 export interface SumoLogicLogEntry {
@@ -22,10 +17,12 @@ export interface SumoLogicLogEntry {
   meta: any;
 }
 
-export class SumoLogic extends winston.Transport implements SumoLogicTransportInstance {
+export class SumoLogic extends TransportStream {
+  name: string;
   url: string;
   label: string;
   meta?: any;
+  onError?: (error: Error) => Promise<void>;
   _timer: any;
   _waitingLogs: Array<SumoLogicLogEntry>;
   _isSending: boolean;
@@ -46,7 +43,8 @@ export class SumoLogic extends winston.Transport implements SumoLogicTransportIn
     this.level = options.level || 'info';
     this.silent = options.silent || false;
     this.label = options.label || '';
-    this.meta = options.meta;
+    this.meta = options.meta || {};
+    this.onError = options.onError;
     this._timer = setInterval(() => {
       if (!this._isSending) {
         this._isSending = true;
@@ -75,6 +73,13 @@ export class SumoLogic extends winston.Transport implements SumoLogicTransportIn
     });
   }
 
+  _handleError(e: Error) {
+    if (this.onError) {
+      return Promise.resolve(this.onError(e));
+    }
+    return Promise.reject(e);
+  }
+
   _sendLogs() {
     try {
       if (this._waitingLogs.length === 0) {
@@ -88,45 +93,39 @@ export class SumoLogic extends winston.Transport implements SumoLogicTransportIn
       return this._request(content)
         .then(() => {
           this._waitingLogs.splice(0, numBeingSent);
-        });
+        })
+        .catch(e => this._handleError(e));
     } catch (e) {
-      return Promise.reject(e);
+      return this._handleError(e);
     }
   }
 
-  log(level: string, msg: string, meta: any, callback: Function) {
+  log(info: any, callback: Function) {
     try {
       if (this.silent) {
-        callback(undefined, true);
+        callback();
         return;
       }
-      if (typeof meta === 'function') {
+      const { level, message, ...meta } = info;
+
+      let _meta = meta || {};
+      if (typeof _meta === 'function') {
         callback = meta;
-        meta = {};
+        _meta = {};
       }
+      _meta = {...this.meta, ..._meta};
+      let _message = message;
       if (this.label) {
-        msg = `[${this.label}] ${msg}`;
-      }
-      if (this.meta != undefined && meta !== undefined) {
-        // Merge metas for a call
-        const m = <any> {};
-        Object.keys(this.meta).forEach(k => {
-          m[k] = this.meta[k];
-        });
-        Object.keys(meta).forEach(k => {
-          m[k] = meta[k];
-        });
-        meta = m;
-      } else
-      if (this.meta != undefined && meta === undefined) {
-        meta = this.meta;
+        _message = `[${this.label}] ${message}`;
       }
       const content = {
-        level: level,
-        message: msg,
-        meta: meta
+        level,
+        message: _message,
+        meta: _meta
       };
       this._waitingLogs.push(content);
+      callback();
+
     } catch (e) {
       callback(e);
     }
